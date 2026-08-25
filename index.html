@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <meta name="theme-color" content="#8f1d1d">
+  <meta name="description" content="小氣簿——我沒有記仇，我只是有完整紀錄。">
+  <meta property="og:title" content="小氣簿">
+  <meta property="og:description" content="有些事可以原諒，但必須有紀錄。">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <title>小氣簿</title>
+</head>
+<body>
+  <div class="paper-grain" aria-hidden="true"></div>
+  <header class="topbar">
+    <button class="brand" data-view="home" aria-label="返回首頁">
+      <span class="brand-mark">😤</span>
+      <span><b>小氣簿</b><small>私人紀律及人情事務處</small></span>
+    </button>
+    <button class="icon-btn more-btn" data-action="open-more" aria-label="更多功能">⋯</button>
+  </header>
+
+  <main id="app" tabindex="-1"></main>
+
+  <nav class="bottom-nav" aria-label="主要導覽">
+    <button data-view="home" class="active"><span>⌂</span>首頁</button>
+    <button data-view="people"><span>♟</span>人物</button>
+    <button data-view="cases"><span>▤</span>案件</button>
+    <button data-view="judge"><span>⚖</span>判案</button>
+    <button data-view="more"><span>☰</span>更多</button>
+  </nav>
+
+  <div id="modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-action="close-modal"></div>
+    <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <header><div><span class="eyebrow">正式文件</span><h2 id="modal-title"></h2></div><button class="icon-btn" data-action="close-modal" aria-label="關閉">×</button></header>
+      <div id="modal-body" class="modal-body"></div>
+    </section>
+  </div>
+
+  <div id="confirm" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <section class="confirm-card" role="alertdialog" aria-modal="true">
+      <span class="stamp small">覆核</span><h2 id="confirm-title">請再次確認</h2><p id="confirm-message"></p>
+      <div class="button-row"><button class="btn ghost" data-action="cancel-confirm">取消</button><button id="confirm-ok" class="btn danger">確認執行</button></div>
+    </section>
+  </div>
+
+  <div id="receipt-screen" class="receipt-screen" hidden>
+    <div class="receipt-toolbar no-print">
+      <button class="btn ghost" data-action="close-receipt">← 返回</button>
+      <div><button class="btn ghost" data-action="print-receipt">列印</button><button class="btn primary" data-action="download-receipt">下載 JPG</button><button class="btn dark" data-action="share-receipt">分享</button></div>
+    </div>
+    <div id="receipt-wrap"></div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <input id="import-file" type="file" accept="application/json" hidden>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

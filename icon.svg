@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#8f1d1d"/>
+  <rect x="65" y="55" width="382" height="402" rx="42" fill="#f4efe4"/>
+  <path d="M116 138h280M116 382h280" stroke="#8f1d1d" stroke-width="12" opacity=".18"/>
+  <text x="256" y="339" text-anchor="middle" font-family="Segoe UI Emoji, Apple Color Emoji, sans-serif" font-size="265">😤</text>
+  <circle cx="390" cy="389" r="54" fill="none" stroke="#b3261e" stroke-width="11" transform="rotate(-12 390 389)" opacity=".72"/>
+</svg>

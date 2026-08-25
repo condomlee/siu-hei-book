@@ -1,0 +1,20 @@
+{
+  "name": "小氣簿",
+  "short_name": "小氣簿",
+  "description": "我沒有記仇，我只是有完整紀錄。",
+  "lang": "zh-HK",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4efe4",
+  "theme_color": "#8f1d1d",
+  "orientation": "portrait-primary",
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ],
+  "shortcuts": [
+    {"name": "快速記一筆", "short_name": "新增案件", "url": "./?action=new-case"},
+    {"name": "人物簿", "short_name": "人物", "url": "./?view=people"}
+  ]
+}
