@@ -97,47 +97,156 @@
     };
   }
 
+  function syncCaseScoreHistory(item, data = db) {
+    const points = CASE_POINTS[item.type] || CASE_POINTS[CASE_TYPES[0]];
+    const entries = data.scoreHistory.filter(entry => entry.caseId === item.id);
+    entries.forEach(entry => { entry.personId = item.personId; });
+
+    let original = entries.find(entry => String(entry.reason || '').startsWith('案件立案：'));
+    if (!original) {
+      original = {
+        id: uid('score'), personId: item.personId, caseId: item.id, amount: points,
+        creditDelta: creditDeltaForType(item.type), reason: `案件立案：${item.title}`,
+        date: item.date, createdAt: item.createdAt || new Date().toISOString()
+      };
+      data.scoreHistory.push(original);
+      entries.push(original);
+    }
+    Object.assign(original, {
+      personId: item.personId,
+      amount: points,
+      creditDelta: creditDeltaForType(item.type),
+      reason: `案件立案：${item.title}`,
+      date: item.date
+    });
+
+    const improvements = entries.filter(entry => String(entry.reason || '').startsWith('完成改善方案：'));
+    improvements.forEach(entry => {
+      entry.amount = -Math.max(1, Math.ceil(points / 2));
+      entry.reason = `完成改善方案：${item.title}`;
+    });
+
+    const pardons = entries.filter(entry => String(entry.reason || '').includes('赦免'));
+    if (pardons.length) {
+      pardons.forEach(entry => { entry.amount = 0; });
+      const balance = entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+      pardons[0].amount = -Math.max(0, balance);
+    }
+  }
+
+  function safeImageData(value) {
+    const image = String(value || '');
+    return /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(image) ? image : '';
+  }
+
+  function normalizeData(source, strict = false) {
+    if (!source || typeof source !== 'object' || !Array.isArray(source.people) || !Array.isArray(source.cases)) {
+      throw new Error('格式不符');
+    }
+    const data = source;
+    data.scoreHistory = Array.isArray(data.scoreHistory) ? data.scoreHistory : [];
+    data.achievements = Array.isArray(data.achievements) ? data.achievements : [];
+    data.settings = data.settings && typeof data.settings === 'object' ? data.settings : {};
+    data.version = Number(data.version) || 1;
+
+    const safeId = value => /^[a-z0-9._:-]+$/i.test(String(value || ''));
+    const personIds = new Set();
+    data.people = data.people.filter(person => {
+      const valid = person && typeof person === 'object' && safeId(person.id) && !personIds.has(String(person.id));
+      if (!valid && strict) throw new Error('人物資料不完整或重複');
+      if (!valid) return false;
+      person.id = String(person.id);
+      person.name = String(person.name || '未命名人物');
+      person.nickname = String(person.nickname || '');
+      person.relation = String(person.relation || '自訂');
+      person.emoji = String(person.emoji || '🙂').slice(0, 12);
+      person.color = /^#[0-9a-f]{6}$/i.test(String(person.color || '')) ? person.color : COLORS[0];
+      person.avatar = safeImageData(person.avatar);
+      personIds.add(person.id);
+      return true;
+    });
+
+    const caseIds = new Set();
+    data.cases = data.cases.filter((item, index) => {
+      if (!item || typeof item !== 'object') {
+        if (strict) throw new Error('案件資料不完整');
+        return false;
+      }
+      item.id = item.id == null ? '' : String(item.id);
+      item.personId = item.personId == null ? '' : String(item.personId);
+      const valid = safeId(item.id) && !caseIds.has(item.id) && personIds.has(item.personId);
+      if (!valid && strict) throw new Error('案件人物連結無效或案件重複');
+      if (!valid) return false;
+      caseIds.add(item.id);
+      item.type = CASE_TYPES.includes(item.type) ? item.type : CASE_TYPES[0];
+      item.points = CASE_POINTS[item.type];
+      item.status = CASE_STATUSES.includes(item.status) ? item.status : CASE_STATUSES[0];
+      item.title = String(item.title || '未命名案件');
+      item.description = String(item.description || '未有案情內容');
+      item.date = /^\d{4}-\d{2}-\d{2}$/.test(String(item.date || '')) ? item.date : isoDate();
+      item.number = String(item.number || caseNumber(index + 1, item.date));
+      item.evidence = safeImageData(item.evidence);
+      item.signature = safeImageData(item.signature);
+      return true;
+    });
+
+    data.scoreHistory = data.scoreHistory.filter(entry => {
+      if (!entry || typeof entry !== 'object') {
+        if (strict) throw new Error('賞罰資料不完整');
+        return false;
+      }
+      entry.personId = entry.personId == null ? '' : String(entry.personId);
+      entry.caseId = entry.caseId == null ? null : String(entry.caseId);
+      const linkedCase = entry.caseId ? data.cases.find(item => item.id === entry.caseId) : null;
+      if (linkedCase) entry.personId = linkedCase.personId;
+      const valid = personIds.has(entry.personId) && (!entry.caseId || caseIds.has(entry.caseId));
+      if (!valid && strict) throw new Error('賞罰紀錄連結無效');
+      if (!valid) return false;
+      entry.id = safeId(entry.id) ? String(entry.id) : uid('score');
+      entry.amount = Number.isFinite(Number(entry.amount)) ? Number(entry.amount) : 0;
+      entry.creditDelta = Number.isFinite(Number(entry.creditDelta)) ? Number(entry.creditDelta) : 0;
+      entry.reason = String(entry.reason || '手動調整');
+      entry.date = /^\d{4}-\d{2}-\d{2}$/.test(String(entry.date || '')) ? entry.date : isoDate();
+      return true;
+    });
+
+    data.cases.forEach(item => syncCaseScoreHistory(item, data));
+    return data;
+  }
+
   function loadData() {
     try {
       const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
       if (stored && Array.isArray(stored.people) && Array.isArray(stored.cases)) {
-        stored.scoreHistory ||= [];
-        stored.achievements ||= [];
-        stored.settings ||= {};
+        normalizeData(stored);
         if (stored.settings.demoData && !stored.people.some(person => person.demo)) {
           stored.people.forEach(person => { if (['阿明', '老婆', '阿仔'].includes(person.name)) person.demo = true; });
           stored.cases.forEach(item => { if (['遲到 35 分鐘', '食晒最後一件蛋糕', '答應買飲品但忘記'].includes(item.title)) item.demo = true; });
           const demoCaseIds = new Set(stored.cases.filter(item => item.demo).map(item => item.id));
           stored.scoreHistory.forEach(item => { if (demoCaseIds.has(item.caseId)) item.demo = true; });
         }
-        let scoreRulesUpdated = false;
-        stored.cases.forEach(item => {
-          const fixedPoints = CASE_POINTS[item.type];
-          if (!fixedPoints) return;
-          if (Number(item.points) !== fixedPoints) {
-            item.points = fixedPoints;
-            scoreRulesUpdated = true;
-          }
-          const originalEntry = stored.scoreHistory.find(entry => entry.caseId === item.id && String(entry.reason).startsWith('案件立案：'));
-          if (originalEntry && Number(originalEntry.amount) !== fixedPoints) {
-            originalEntry.amount = fixedPoints;
-            scoreRulesUpdated = true;
-          }
-        });
-        if (scoreRulesUpdated) localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
         return stored;
       }
     } catch (error) {
       console.warn('備份資料無法讀取，已載入示範資料。', error);
     }
     const initial = createDemoData();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(initial)); }
+    catch (error) { console.warn('裝置儲存空間不足，示範資料暫時只會保留到關閉頁面。', error); }
     return initial;
   }
 
   function saveData() {
-    db.achievements = calculateAchievements();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    try {
+      db.achievements = calculateAchievements();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+      return true;
+    } catch (error) {
+      console.warn('資料無法儲存。', error);
+      showToast('無法儲存：裝置空間可能已滿，請先匯出備份或移除大型圖片。');
+      return false;
+    }
   }
 
   function caseNumber(sequence = db?.cases?.length + 1 || 1, date = isoDate()) {
@@ -245,7 +354,7 @@
   function renderPeople() {
     const cards = db.people.map(person => {
       const s = personStats(person.id);
-      return `<article class="person-card" data-action="person-detail" data-id="${person.id}" data-status="${dangerStatus(s.points)}" tabindex="0">${avatarMarkup(person)}<div><h3>${esc(person.name)}</h3><p>${esc(person.nickname || person.relation)} · ${esc(person.relation)}</p><div class="mini-stats"><span>犯錯點數 <b>${s.points}</b></span><span>案件 <b>${s.total}</b></span><span>信用 <b>${s.credit}</b></span></div><div class="danger-meter" style="--value:${Math.min(100, s.points)}%"><i></i></div><div class="meter-label"><span>${dangerStatus(s.points)}</span><span>危險指數 ${Math.min(100, s.points)}%</span></div></div></article>`;
+      return `<article class="person-card" role="button" data-action="person-detail" data-id="${person.id}" data-status="${dangerStatus(s.points)}" tabindex="0">${avatarMarkup(person)}<div><h3>${esc(person.name)}</h3><p>${esc(person.nickname || person.relation)} · ${esc(person.relation)}</p><div class="mini-stats"><span>犯錯點數 <b>${s.points}</b></span><span>案件 <b>${s.total}</b></span><span>信用 <b>${s.credit}</b></span></div><div class="danger-meter" style="--value:${Math.min(100, s.points)}%"><i></i></div><div class="meter-label"><span>${dangerStatus(s.points)}</span><span>危險指數 ${Math.min(100, s.points)}%</span></div></div></article>`;
     }).join('');
     app.innerHTML = `${pageHead('人物管理 · SUBJECT REGISTRY', '人物簿', '一人一檔，童叟無欺。', '<button class="btn primary" data-action="new-person">＋ 新增人物</button>')}<div class="toolbar"><input id="people-search" class="search" type="search" placeholder="搜尋姓名、暱稱或關係" aria-label="搜尋人物"></div><section id="people-grid" class="people-grid">${cards || '<div class="empty">人物簿仍然清白。</div>'}</section>`;
   }
@@ -441,30 +550,40 @@
   function creditDeltaForType(type) { return type==='大過'?-8:-2; }
 
   async function handlePersonSubmit(form) {
-    const fd=new FormData(form); const data=Object.fromEntries(fd); const existing=form.dataset.id?personById(form.dataset.id):null;
-    const avatar=fd.get('avatarFile')?.size?await imageToDataUrl(fd.get('avatarFile')):(existing?.avatar||'');
-    if(existing){ Object.assign(existing,{name:data.name.trim(),nickname:data.nickname.trim(),relation:data.relation,emoji:data.emoji||'🙂',color:data.color,avatar}); }
-    else db.people.push({id:uid('person'),name:data.name.trim(),nickname:data.nickname.trim(),relation:data.relation,emoji:data.emoji||'🙂',color:data.color,avatar,demo:false,createdAt:new Date().toISOString()});
-    saveData(); closeModal(); render(); showToast(form.dataset.id?'人物檔案已更新。':'人物檔案已正式建立。');
+    const before=structuredClone(db);
+    try {
+      const fd=new FormData(form); const data=Object.fromEntries(fd); const existing=form.dataset.id?personById(form.dataset.id):null;
+      const avatar=fd.get('avatarFile')?.size?await imageToDataUrl(fd.get('avatarFile')):(existing?.avatar||'');
+      if(existing){ Object.assign(existing,{name:data.name.trim(),nickname:data.nickname.trim(),relation:data.relation,emoji:data.emoji||'🙂',color:data.color,avatar}); }
+      else db.people.push({id:uid('person'),name:data.name.trim(),nickname:data.nickname.trim(),relation:data.relation,emoji:data.emoji||'🙂',color:data.color,avatar,demo:false,createdAt:new Date().toISOString()});
+      if(!saveData()){db=before;return;} closeModal(); render(); showToast(form.dataset.id?'人物檔案已更新。':'人物檔案已正式建立。');
+    } catch (error) {
+      db=before; showToast('人物圖片無法讀取，請改用 JPG、PNG 或其他一般圖片格式。');
+    }
   }
 
   async function handleCaseSubmit(form) {
-    const fd=new FormData(form); const data=Object.fromEntries(fd); const existing=form.dataset.id?caseById(form.dataset.id):null; const points=CASE_POINTS[data.type];
-    const evidence=fd.get('evidenceFile')?.size?await imageToDataUrl(fd.get('evidenceFile')):(existing?.evidence||'');
-    const payload={personId:data.personId,title:data.title.trim(),description:data.description.trim(),date:data.date,time:data.time,place:data.place.trim(),type:data.type,points,mood:data.mood,suggestion:data.suggestion.trim(),dueDate:data.dueDate,status:data.status,notes:data.notes.trim(),evidence,isRepeat:fd.has('isRepeat')};
-    if(existing){
-      const history=db.scoreHistory.find(h=>h.caseId===existing.id && h.reason.startsWith('案件立案：'));
-      if(history){history.amount=points;history.personId=data.personId;history.creditDelta=creditDeltaForType(data.type);history.reason=`案件立案：${payload.title}`;history.date=data.date;}
-      Object.assign(existing,payload,{updatedAt:new Date().toISOString()});
-    }else{
-      const item={id:uid('case'),number:caseNumber(db.cases.length+1,data.date),...payload,signature:'',createdAt:new Date().toISOString()}; db.cases.push(item); db.scoreHistory.push({id:uid('score'),personId:item.personId,caseId:item.id,amount:points,creditDelta:creditDeltaForType(item.type),reason:`案件立案：${item.title}`,date:item.date,createdAt:item.createdAt});
+    const before=structuredClone(db);
+    try {
+      const fd=new FormData(form); const data=Object.fromEntries(fd); const existing=form.dataset.id?caseById(form.dataset.id):null; const points=CASE_POINTS[data.type];
+      const evidence=fd.get('evidenceFile')?.size?await imageToDataUrl(fd.get('evidenceFile')):(existing?.evidence||'');
+      const payload={personId:data.personId,title:data.title.trim(),description:data.description.trim(),date:data.date,time:data.time,place:data.place.trim(),type:data.type,points,mood:data.mood,suggestion:data.suggestion.trim(),dueDate:data.dueDate,status:data.status,notes:data.notes.trim(),evidence,isRepeat:fd.has('isRepeat')};
+      if(existing){
+        Object.assign(existing,payload,{updatedAt:new Date().toISOString()});
+        syncCaseScoreHistory(existing);
+      }else{
+        const item={id:uid('case'),number:caseNumber(db.cases.length+1,data.date),...payload,signature:'',createdAt:new Date().toISOString()}; db.cases.push(item); syncCaseScoreHistory(item);
+      }
+      if(!saveData()){db=before;return;} closeModal(); render(); showToast(existing?'案件資料已更新。':data.type==='大過'?'大過已正式立案。':'已正式記錄，此事現在有案底。');
+    } catch (error) {
+      db=before; showToast('案件證據圖片無法讀取，請改用 JPG、PNG 或其他一般圖片格式。');
     }
-    saveData(); closeModal(); render(); showToast(existing?'案件資料已更新。':data.type==='大過'?'大過已正式立案。':'已正式記錄，此事現在有案底。');
   }
 
   function handleScoreSubmit(form) {
     const data=Object.fromEntries(new FormData(form)); const amount=Number(data.amount), creditDelta=Number(data.creditDelta); const reason=data.customReason.trim()||data.preset||'手動調整';
-    db.scoreHistory.push({id:uid('score'),personId:form.dataset.id,caseId:null,amount,creditDelta,reason,date:isoDate(),createdAt:new Date().toISOString()}); saveData(); personDetail(form.dataset.id); showToast('賞罰紀錄已保存，分數正式生效。');
+    if(!Number.isFinite(amount)||!Number.isFinite(creditDelta)){showToast('請輸入有效的賞罰分數。');return;}
+    const before=structuredClone(db); db.scoreHistory.push({id:uid('score'),personId:form.dataset.id,caseId:null,amount,creditDelta,reason,date:isoDate(),createdAt:new Date().toISOString()}); if(!saveData()){db=before;return;} personDetail(form.dataset.id); showToast('賞罰紀錄已保存，分數正式生效。');
   }
 
   function judgeEvent(event,personId,mode) {
@@ -491,12 +610,13 @@
 
   function improveCase(id) {
     const c=caseById(id); if(!c)return;
-    c.status='已改善'; const deduction=-Math.max(1,Math.ceil(c.points/2)); db.scoreHistory.push({id:uid('score'),personId:c.personId,caseId:c.id,amount:deduction,creditDelta:5,reason:`完成改善方案：${c.title}`,date:isoDate(),createdAt:new Date().toISOString()}); saveData(); closeModal(); render(); showToast('本案已成功改善，可以暫時放低。');
+    const before=structuredClone(db); c.status='已改善'; const deduction=-Math.max(1,Math.ceil(c.points/2)); db.scoreHistory.push({id:uid('score'),personId:c.personId,caseId:c.id,amount:deduction,creditDelta:5,reason:`完成改善方案：${c.title}`,date:isoDate(),createdAt:new Date().toISOString()}); if(!saveData()){db=before;return;} closeModal(); render(); showToast('本案已成功改善，可以暫時放低。');
   }
 
-  function pardonCase(id, reason='特別赦免') {
+  function pardonCase(id, reason='特別赦免', options={}) {
     const c=caseById(id); if(!c||c.status==='已赦免')return;
-    c.status='已赦免'; const currentCaseBalance=db.scoreHistory.filter(h=>h.caseId===id).reduce((s,h)=>s+Number(h.amount||0),0); if(currentCaseBalance>0)db.scoreHistory.push({id:uid('score'),personId:c.personId,caseId:c.id,amount:-currentCaseBalance,creditDelta:4,reason,date:isoDate(),createdAt:new Date().toISOString()}); saveData(); closeModal(); render(); showToast('本案獲特別赦免，但歷史仍然存在。');
+    const before=options.save===false?null:structuredClone(db); c.status='已赦免'; const currentCaseBalance=db.scoreHistory.filter(h=>h.caseId===id).reduce((s,h)=>s+Number(h.amount||0),0); if(currentCaseBalance>0)db.scoreHistory.push({id:uid('score'),personId:c.personId,caseId:c.id,amount:-currentCaseBalance,creditDelta:4,reason,date:isoDate(),createdAt:new Date().toISOString()});
+    if(options.save!==false&&!saveData()){db=before;return false;} if(!options.silent){closeModal();render();showToast('本案獲特別赦免，但歷史仍然存在。');} return true;
   }
 
   function receiptMarkup(c) {
@@ -517,7 +637,7 @@
     const point=e=>{const r=canvas.getBoundingClientRect();return{x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height};};
     canvas.addEventListener('pointerdown',e=>{drawing=true;canvas.setPointerCapture(e.pointerId);const p=point(e);ctx.beginPath();ctx.moveTo(p.x,p.y);});
     canvas.addEventListener('pointermove',e=>{if(!drawing)return;const p=point(e);ctx.lineTo(p.x,p.y);ctx.stroke();});
-    const persistSignature=()=>{if(!drawing)return;drawing=false;const item=caseById(selectedCaseId);if(item){item.signature=canvas.toDataURL('image/png');saveData();}};
+    const persistSignature=()=>{if(!drawing)return;drawing=false;const item=caseById(selectedCaseId);if(item){const previous=item.signature;item.signature=canvas.toDataURL('image/png');if(!saveData())item.signature=previous;}};
     canvas.addEventListener('pointerup',persistSignature); canvas.addEventListener('pointercancel',persistSignature);
   }
 
@@ -541,7 +661,8 @@
   function exportData() { const blob=new Blob([JSON.stringify(db,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`小氣簿備份-${isoDate()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);showToast('完整資料備份已下載。'); }
 
   async function importData(file) {
-    try{const data=JSON.parse(await file.text());if(!Array.isArray(data.people)||!Array.isArray(data.cases)||!Array.isArray(data.scoreHistory))throw new Error('格式不符');db=data;db.settings||={};db.achievements||=[];saveData();setView('home');showToast('資料已成功恢復。');}catch(error){showToast('無法匯入：這不是有效的小氣簿備份。');}
+    const before=db;
+    try{const data=normalizeData(JSON.parse(await file.text()),true);db=data;if(!saveData()){db=before;return;}setView('home');showToast('資料已成功恢復，舊版分數亦已按現行規則修正。');}catch(error){db=before;showToast('無法匯入：備份格式不完整或資料連結有誤。');}
   }
 
   function filterCases() {
@@ -584,9 +705,9 @@
     if(form.id==='person-form')handlePersonSubmit(form);
     if(form.id==='case-form')handleCaseSubmit(form);
     if(form.id==='score-form')handleScoreSubmit(form);
-    if(form.id==='judge-form'){const data=Object.fromEntries(new FormData(form));const result=judgeEvent(data.event,data.personId,data.mode);db.settings.judgeMode=data.mode;saveData();renderVerdict(result,data.event,data.personId);}
-    if(form.id==='birthday-form'){const id=new FormData(form).get('personId');db.scoreHistory.push({id:uid('score'),personId:id,caseId:null,amount:-5,creditDelta:4,reason:'生日特赦',date:isoDate(),createdAt:new Date().toISOString()});saveData();closeModal();render();showToast('生日特赦已批出，歷史仍然存在。');}
-    if(form.id==='mass-pardon-form'){const ids=new FormData(form).getAll('caseId');ids.forEach(id=>pardonCase(id,'新年大赦'));closeModal();render();if(ids.length)showToast(`已赦免 ${ids.length} 宗案件，歷史仍然存在。`);}
+    if(form.id==='judge-form'){const data=Object.fromEntries(new FormData(form));const result=judgeEvent(data.event,data.personId,data.mode);const previousMode=db.settings.judgeMode;db.settings.judgeMode=data.mode;if(!saveData())db.settings.judgeMode=previousMode;renderVerdict(result,data.event,data.personId);}
+    if(form.id==='birthday-form'){const id=new FormData(form).get('personId');const deduction=Math.min(5,personPoints(id));if(!deduction){showToast('這位人物目前沒有犯錯點數可供減免。');return;}const before=structuredClone(db);db.scoreHistory.push({id:uid('score'),personId:id,caseId:null,amount:-deduction,creditDelta:4,reason:'生日特赦',date:isoDate(),createdAt:new Date().toISOString()});if(!saveData()){db=before;return;}closeModal();render();showToast(`生日特赦已減少 ${deduction} 點，歷史仍然存在。`);}
+    if(form.id==='mass-pardon-form'){const ids=new FormData(form).getAll('caseId');if(!ids.length){showToast('請至少選擇一宗案件。');return;}const before=structuredClone(db);ids.forEach(id=>pardonCase(id,'新年大赦',{save:false,silent:true}));if(!saveData()){db=before;return;}closeModal();render();showToast(`已赦免 ${ids.length} 宗案件，歷史仍然存在。`);}
   });
 
   document.addEventListener('input', event => { if(event.target.id==='case-search'||event.target.id==='people-search')event.target.id==='case-search'?filterCases():filterPeople(); });
@@ -597,7 +718,10 @@
   });
 
   $('#confirm-ok').addEventListener('click',()=>pendingConfirm?.());
-  document.addEventListener('keydown',event=>{if(event.key==='Escape'){if(!$('#receipt-screen').hidden)closeReceipt();else if(!$('#modal').hidden)closeModal();else if(!$('#confirm').hidden)closeConfirm();}});
+  document.addEventListener('keydown',event=>{
+    if(event.key==='Escape'){if(!$('#receipt-screen').hidden)closeReceipt();else if(!$('#modal').hidden)closeModal();else if(!$('#confirm').hidden)closeConfirm();return;}
+    if((event.key==='Enter'||event.key===' ')&&event.target.matches('[role="button"][data-action], [role="button"][data-view]')){event.preventDefault();event.target.click();}
+  });
 
   if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(error=>console.warn('離線模式註冊失敗',error)));
 

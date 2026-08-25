@@ -1,4 +1,4 @@
-const CACHE = 'siu-hei-book-v7';
+const CACHE = 'siu-hei-book-v9';
 const CORE = ['./', './index.html', './style.css', './app.js', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', event => {
@@ -18,6 +18,6 @@ self.addEventListener('fetch', event => {
         caches.open(CACHE).then(cache => cache.put(event.request, copy));
       }
       return response;
-    }).catch(() => caches.match('./index.html')))
+    }).catch(() => event.request.mode === 'navigate' ? caches.match('./index.html') : Response.error()))
   );
 });
