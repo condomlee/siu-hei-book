@@ -3,6 +3,7 @@
   <h1>小氣簿</h1>
   <p><strong>我沒有記仇，我只是有完整紀錄。</strong></p>
   <p>一個帶黑色幽默與儀式感的「人際犯錯紀錄系統」。<br>把朋友、家人、另一半和同事令人激氣的日常小事，正式記入案卷。</p>
+  <p><a href="https://bbeennhk.github.io/siu-hei-book/"><strong>立即開啟小氣簿 😤</strong></a></p>
 </div>
 
 ## 專案介紹
@@ -63,6 +64,8 @@
 
 ## 部署到 GitHub Pages
 
+正式網站：**[https://bbeennhk.github.io/siu-hei-book/](https://bbeennhk.github.io/siu-hei-book/)**
+
 建議 Repository name：
 
 ```text
@@ -78,17 +81,17 @@ siu-hei-book
 5. 選擇從主要分支的根目錄發佈網站。
 6. 等待 GitHub Pages 完成部署。
 
-部署後網址通常為：
+本專案的 GitHub Pages 網址：
 
 ```text
-https://你的GitHub用戶名稱.github.io/siu-hei-book/
+https://bbeennhk.github.io/siu-hei-book/
 ```
 
 更多說明請參閱 [GitHub Pages 官方文件](https://docs.github.com/en/pages/getting-started-with-github-pages/creating-a-github-pages-site)。
 
 ## 安裝至 iPhone 主畫面
 
-1. 使用 Safari 開啟已部署的 GitHub Pages 網址。
+1. 使用 Safari 開啟 [小氣簿 GitHub Pages 網站](https://bbeennhk.github.io/siu-hei-book/)。
 2. 點擊 Safari 的「分享」按鈕。
 3. 選擇「加入主畫面」。
 4. 確認名稱後點擊「加入」。
