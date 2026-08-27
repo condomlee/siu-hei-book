@@ -290,6 +290,47 @@
     return Boolean(gistConfig.token && gistConfig.gistId);
   }
 
+  /**
+   * One-time share link support.
+   * Accepts either:
+   *   ?gistId=xxx&token=ghp_xxx
+   *   #gistId=xxx&token=ghp_xxx
+   * Hash is preferred (not sent to servers). Params are consumed once,
+   * written to localStorage, then stripped from the address bar.
+   */
+  function consumeShareLinkCredentials() {
+    const fromSearch = new URLSearchParams(location.search);
+    const fromHash = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
+    const gistId = (fromHash.get('gistId') || fromHash.get('gist') ||
+                    fromSearch.get('gistId') || fromSearch.get('gist') || '').trim();
+    const token = (fromHash.get('token') || fromSearch.get('token') || '').trim();
+
+    if (!gistId || !token) return false;
+
+    gistConfig = { gistId, token };
+    persistGistConfig();
+
+    // Strip credentials from URL immediately (one-time use)
+    const clean = new URL(location.href);
+    clean.searchParams.delete('gistId');
+    clean.searchParams.delete('gist');
+    clean.searchParams.delete('token');
+    // Preserve other params like view=
+    const view = clean.searchParams.get('view');
+    clean.search = view ? `?view=${encodeURIComponent(view)}` : '';
+    clean.hash = '';
+    history.replaceState({}, '', clean.pathname + clean.search);
+
+    return true;
+  }
+
+  function buildShareLink() {
+    if (!isGistConfigured()) return '';
+    // Prefer hash so credentials are not sent to any server in the request line
+    const base = location.origin + location.pathname;
+    return `${base}#gistId=${encodeURIComponent(gistConfig.gistId)}&token=${encodeURIComponent(gistConfig.token)}`;
+  }
+
   function scheduleGistPush() {
     if (!isGistConfigured() || suppressGistPush) return;
     // Never auto-upload pure demo data over the cloud
@@ -759,8 +800,10 @@
             <p style="font-size:0.85em;color:#666;margin-bottom:12px">Gist ID：${esc(gistConfig.gistId)}<br>Token：${esc(maskedToken)}</p>
             <div class="button-row wrap" style="margin-bottom:12px">
               <button class="btn primary small" data-action="gist-sync">立即同步</button>
+              <button class="btn ghost small" data-action="gist-share-link">複製一次性連結</button>
               <button class="btn danger small" data-action="gist-clear">解除同步</button>
             </div>
+            <p style="font-size:0.78em;color:#888;margin:0 0 8px;line-height:1.4">一次性連結會把 Token 放在網址裡，開啟後自動寫入本機並清除網址。請只傳給信任的裝置，用完可在 GitHub 撤銷 Token。</p>
           ` : `
             <form id="gist-config-form">
               <div class="field"><label>Gist ID</label><input name="gistId" type="text" required placeholder="從 gist.github.com 網址複製" autocomplete="off"></div>
@@ -1016,6 +1059,17 @@
       'clear-all':()=>confirmAction('確認清除','這會清除全部人物、案件、簽名及分數。之後有 30 秒可以復原。',()=>{closeConfirm();performClearAll();}),
       'undo-clear':()=>undoClearAll(),
       'gist-sync':async()=>{showToast('正在同步…');const ok=await syncFromRemote({silent:false});if(ok)render();if(currentView==='settings')render();},
+      'gist-share-link':async()=>{
+        const link=buildShareLink();
+        if(!link){showToast('尚未設定 Gist');return;}
+        try{
+          await navigator.clipboard.writeText(link);
+          showToast('已複製一次性連結（請妥善保管）');
+        }catch(_){
+          // Fallback prompt for older browsers
+          window.prompt('複製以下一次性連結：', link);
+        }
+      },
       'gist-clear':()=>confirmAction('解除雲端同步','只會清除本機儲存的 Token 與 Gist ID，不會刪除 Gist 本身。',()=>{gistConfig={token:'',gistId:''};persistGistConfig();lastSyncAt=null;lastSyncError=null;closeConfirm();render();showToast('已解除自動同步');}),
       'cancel-confirm':closeConfirm,
       'verdict-to-case':()=>{const verdict={personId:target.dataset.person,title:decodeURIComponent(target.dataset.event).slice(0,42),description:decodeURIComponent(target.dataset.event),type:target.dataset.type,points:Number(target.dataset.points),suggestion:decodeURIComponent(target.dataset.suggestion),date:isoDate(),time:nowTime(),status:'待處理',mood:'激氣'};openModal('採納判決並立案',caseForm(verdict));}
@@ -1062,8 +1116,13 @@
   const query=new URLSearchParams(location.search); render();
   if(query.get('action')==='new-case')setTimeout(()=>openCaseForm(),100);
 
-  // Always fetch remote on every page load / refresh when configured
-  if (isGistConfigured()) {
+  // One-time share link: write credentials, strip URL, then sync
+  const fromShareLink = consumeShareLinkCredentials();
+  if (fromShareLink) {
+    showToast('已透過連結寫入同步設定…');
+    connectAndSyncGist().then(() => { render(); });
+  } else if (isGistConfigured()) {
+    // Always fetch remote on every page load / refresh when configured
     syncFromRemote({ silent: true }).then(pulled => {
       if (pulled) {
         render();
