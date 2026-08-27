@@ -22,6 +22,7 @@
     ['zero-30', '🗓️', '30 日零犯錯', '保持一個月清白紀錄'],
     ['annual-star', '🏆', '年度風頭躉', '暫居全年榜首']
   ];
+  const CLEAR_UNDO_MS = 30000;
 
   let db = loadData();
   let currentView = new URLSearchParams(location.search).get('view') || 'home';
@@ -38,6 +39,11 @@
   let isSyncing = false;
   let lastSyncAt = null;
   let lastSyncError = null;
+  let suppressGistPush = false;
+
+  // Clear-all undo window
+  let clearUndoSnapshot = null;
+  let clearUndoTimer = null;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -252,7 +258,7 @@
       db.settings = db.settings || {};
       db.settings.lastLocalSave = new Date().toISOString();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-      scheduleGistPush();
+      if (!suppressGistPush) scheduleGistPush();
       return true;
     } catch (error) {
       console.warn('資料無法儲存。', error);
@@ -285,7 +291,7 @@
   }
 
   function scheduleGistPush() {
-    if (!isGistConfigured()) return;
+    if (!isGistConfigured() || suppressGistPush) return;
     // Never auto-upload pure demo data over the cloud
     if (isMostlyDemoData(db)) return;
     clearTimeout(syncTimer);
@@ -331,7 +337,7 @@
   }
 
   async function pushToGist({ silent = true } = {}) {
-    if (!isGistConfigured() || isSyncing) return false;
+    if (!isGistConfigured() || isSyncing || suppressGistPush) return false;
     isSyncing = true;
     lastSyncError = null;
     try {
@@ -365,36 +371,48 @@
     }
   }
 
-  async function pullFromGist({ force = false } = {}) {
-    if (!isGistConfigured()) return false;
+  /**
+   * Single public sync: always fetch remote and apply when usable.
+   * Used on every page refresh and by the "立即同步" button.
+   */
+  async function syncFromRemote({ silent = false } = {}) {
+    if (!isGistConfigured()) {
+      if (!silent) showToast('尚未設定 Gist');
+      return false;
+    }
+    if (isSyncing) {
+      if (!silent) showToast('同步進行中，請稍候');
+      return false;
+    }
+    isSyncing = true;
+    lastSyncError = null;
     try {
-      const { remote, updatedAt } = await fetchGistSnapshot();
-      if (!hasUsableRemoteData(remote)) return false;
-
-      const remoteTime = new Date(updatedAt).getTime();
-      const localTime = db.settings?.lastLocalSave
-        ? new Date(db.settings.lastLocalSave).getTime()
-        : 0;
-
-      // Prefer remote when local is still demo-only, even if timestamps look newer
-      const shouldPull = force
-        || isMostlyDemoData(db)
-        || remoteTime > localTime;
-
-      if (!shouldPull) {
-        console.log('[Gist] local is newer or same, skip pull');
+      const { remote } = await fetchGistSnapshot();
+      if (!hasUsableRemoteData(remote)) {
+        if (!silent) showToast('雲端尚無可用資料');
         return false;
       }
-
       normalizeData(remote, true);
       db = remote;
       lastSyncAt = new Date().toISOString();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+      // Persist without scheduling a push (we just pulled)
+      suppressGistPush = true;
+      try {
+        db.settings = db.settings || {};
+        db.settings.lastLocalSave = new Date().toISOString();
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+      } finally {
+        suppressGistPush = false;
+      }
+      if (!silent) showToast('已從雲端載入資料');
       return true;
     } catch (err) {
       lastSyncError = err.message || String(err);
-      console.warn('[Gist] pull failed:', lastSyncError);
+      console.warn('[Gist] sync failed:', lastSyncError);
+      if (!silent) showToast('同步失敗：' + lastSyncError);
       return false;
+    } finally {
+      isSyncing = false;
     }
   }
 
@@ -407,7 +425,12 @@
         normalizeData(remote, true);
         db = remote;
         lastSyncAt = new Date().toISOString();
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+        suppressGistPush = true;
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+        } finally {
+          suppressGistPush = false;
+        }
         showToast('已從雲端載入資料，自動同步已啟用');
         return 'pulled';
       }
@@ -424,6 +447,82 @@
       showToast('連線失敗：' + lastSyncError);
       return 'error';
     }
+  }
+
+  // ── Clear-all with 30s undo ────────────────────────────────────────
+  function cancelClearUndo() {
+    if (clearUndoTimer) {
+      clearTimeout(clearUndoTimer);
+      clearUndoTimer = null;
+    }
+    clearUndoSnapshot = null;
+    suppressGistPush = false;
+  }
+
+  function performClearAll() {
+    cancelClearUndo();
+    clearUndoSnapshot = structuredClone(db);
+    suppressGistPush = true; // do not push empty db to Gist during undo window
+
+    db = {
+      version: 1,
+      people: [],
+      cases: [],
+      scoreHistory: [],
+      achievements: [],
+      settings: { ownerName: '本簿持有人', demoData: false, lastLocalSave: new Date().toISOString() }
+    };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    } catch (e) {
+      console.warn(e);
+    }
+
+    setView('home');
+    showClearUndoToast();
+
+    clearUndoTimer = setTimeout(() => {
+      clearUndoSnapshot = null;
+      clearUndoTimer = null;
+      suppressGistPush = false;
+      showToast('資料已永久清除');
+    }, CLEAR_UNDO_MS);
+  }
+
+  function undoClearAll() {
+    if (!clearUndoSnapshot) {
+      showToast('已超過復原時間');
+      return;
+    }
+    db = clearUndoSnapshot;
+    cancelClearUndo();
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    } catch (e) {
+      console.warn(e);
+    }
+    render();
+    showToast('已復原全部資料');
+  }
+
+  function showClearUndoToast() {
+    const toast = $('#toast');
+    if (!toast) return;
+    // CSS sets .toast { pointer-events: none } — must enable for the undo button
+    toast.style.pointerEvents = 'auto';
+    toast.innerHTML =
+      '全部資料已清除。 ' +
+      '<button type="button" id="undo-clear-btn" data-action="undo-clear" ' +
+      'style="margin-left:8px;padding:4px 12px;border:1px solid currentColor;border-radius:6px;' +
+      'background:rgba(255,255,255,.15);color:inherit;cursor:pointer;font:inherit;font-weight:600;">' +
+      '復原</button>';
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.classList.remove('show');
+      toast.textContent = '';
+      toast.style.pointerEvents = '';
+    }, CLEAR_UNDO_MS - 200);
   }
 
   function gistStatusText() {
@@ -648,19 +747,18 @@
         <div class="setting-row"><span><strong>📤 匯出全部資料</strong><small>下載一份 JSON 完整備份</small></span><button class="btn ghost small" data-action="export-data">下載</button></div>
         <div class="setting-row"><span><strong>📥 匯入及恢復</strong><small>從小氣簿 JSON 備份還原</small></span><button class="btn ghost small" data-action="import-data">選擇檔案</button></div>
         <div class="setting-row"><span><strong>🧹 清除示範資料</strong><small>移除首次開啟時提供的範例</small></span><button class="btn ghost small" data-action="clear-demo" ${db.settings.demoData?'':'disabled'}>${db.settings.demoData?'清除':'已清除'}</button></div>
-        <div class="setting-row"><span><strong>🗑️ 清除全部資料</strong><small>這項操作需要二次確認</small></span><button class="btn danger small" data-action="clear-all">清除</button></div>
+        <div class="setting-row"><span><strong>🗑️ 清除全部資料</strong><small>30 秒內可復原</small></span><button class="btn danger small" data-action="clear-all">清除</button></div>
       </section>
 
       <section class="panel" style="margin-top:16px">
         <div class="panel-body" style="padding-top:17px">
           <span class="eyebrow">雲端自動同步 · GITHUB GIST</span>
-          <p style="margin:8px 0 12px;font-size:0.9em;line-height:1.5">設定後每次儲存會自動同步到你的私密 Gist，換裝置時自動載入。Token 只存在本機，不會上傳到其他地方。</p>
+          <p style="margin:8px 0 12px;font-size:0.9em;line-height:1.5">每次重新整理頁面會自動從雲端拉取最新資料。本機儲存後會在背景上傳。Token 只存在本機。</p>
           ${configured ? `
             <p style="font-size:0.88em;margin-bottom:8px"><strong>狀態：</strong>${esc(gistStatusText())}</p>
             <p style="font-size:0.85em;color:#666;margin-bottom:12px">Gist ID：${esc(gistConfig.gistId)}<br>Token：${esc(maskedToken)}</p>
             <div class="button-row wrap" style="margin-bottom:12px">
-              <button class="btn ghost small" data-action="gist-force-push">立即上傳</button>
-              <button class="btn ghost small" data-action="gist-force-pull">立即下載</button>
+              <button class="btn primary small" data-action="gist-sync">立即同步</button>
               <button class="btn danger small" data-action="gist-clear">解除同步</button>
             </div>
           ` : `
@@ -708,8 +806,17 @@
   }
 
   function showToast(message) {
-    const toast=$('#toast'); toast.textContent=message; toast.classList.add('show');
-    clearTimeout(toastTimer); toastTimer=setTimeout(()=>toast.classList.remove('show'),3200);
+    const toast = $('#toast');
+    if (!toast) return;
+    toast.style.pointerEvents = 'none';
+    toast.textContent = message;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.classList.remove('show');
+      toast.textContent = '';
+      toast.style.pointerEvents = '';
+    }, 3200);
   }
 
   function confirmAction(title,message,callback) {
@@ -906,9 +1013,9 @@
       'birthday-pardon':()=>openModal('生日特赦',`<form id="birthday-form"><div class="field"><label>壽星人物</label><select name="personId" required>${db.people.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div><p>批出後減少 5 點犯錯分，並增加 4 點信用分。</p><button class="btn primary block" type="submit">批出生日特赦</button></form>`),
       'mass-pardon':()=>openModal('新年大赦',massPardonForm()),'export-data':exportData,'import-data':()=>$('#import-file').click(),
       'clear-demo':()=>confirmAction('清除示範資料','只會清除系統首次建立的示範人物、案件及分數，確定嗎？',()=>{const demoPersonIds=new Set(db.people.filter(p=>p.demo).map(p=>p.id));const demoCaseIds=new Set(db.cases.filter(c=>c.demo).map(c=>c.id));db.people=db.people.filter(p=>!p.demo);db.cases=db.cases.filter(c=>!c.demo);db.scoreHistory=db.scoreHistory.filter(h=>!h.demo&&!demoPersonIds.has(h.personId)&&!demoCaseIds.has(h.caseId));db.settings.demoData=false;saveData();closeConfirm();render();showToast('示範資料已清除，可以開始建立你的紀錄。');}),
-      'clear-all':()=>confirmAction('第一次確認','這會清除全部人物、案件、簽名及分數。按下後仍需最後一次確認。',()=>{closeConfirm();setTimeout(()=>confirmAction('最後確認','真的要把整本小氣簿清空？此操作不能復原。',()=>{db={version:1,people:[],cases:[],scoreHistory:[],achievements:[],settings:{ownerName:'本簿持有人',demoData:false}};saveData();closeConfirm();setView('home');showToast('全部資料已清除。');}),150);}),
-      'gist-force-push':async()=>{showToast('正在上傳…');await pushToGist({silent:false});if(currentView==='settings')render();},
-      'gist-force-pull':()=>confirmAction('從 Gist 下載','會用雲端資料覆蓋本機目前內容，確定嗎？',async()=>{closeConfirm();showToast('正在下載…');const ok=await pullFromGist({force:true});if(ok){render();showToast('已從 Gist 載入資料');}else showToast(lastSyncError?'下載失敗：'+lastSyncError:'雲端沒有較新資料或格式不符');}),
+      'clear-all':()=>confirmAction('確認清除','這會清除全部人物、案件、簽名及分數。之後有 30 秒可以復原。',()=>{closeConfirm();performClearAll();}),
+      'undo-clear':()=>undoClearAll(),
+      'gist-sync':async()=>{showToast('正在同步…');const ok=await syncFromRemote({silent:false});if(ok)render();if(currentView==='settings')render();},
       'gist-clear':()=>confirmAction('解除雲端同步','只會清除本機儲存的 Token 與 Gist ID，不會刪除 Gist 本身。',()=>{gistConfig={token:'',gistId:''};persistGistConfig();lastSyncAt=null;lastSyncError=null;closeConfirm();render();showToast('已解除自動同步');}),
       'cancel-confirm':closeConfirm,
       'verdict-to-case':()=>{const verdict={personId:target.dataset.person,title:decodeURIComponent(target.dataset.event).slice(0,42),description:decodeURIComponent(target.dataset.event),type:target.dataset.type,points:Number(target.dataset.points),suggestion:decodeURIComponent(target.dataset.suggestion),date:isoDate(),time:nowTime(),status:'待處理',mood:'激氣'};openModal('採納判決並立案',caseForm(verdict));}
@@ -955,16 +1062,15 @@
   const query=new URLSearchParams(location.search); render();
   if(query.get('action')==='new-case')setTimeout(()=>openCaseForm(),100);
 
-  // Auto-pull from Gist on startup when configured
-  // (always prefers remote if local is still demo data)
+  // Always fetch remote on every page load / refresh when configured
   if (isGistConfigured()) {
-    pullFromGist({ force: isMostlyDemoData(db) }).then(pulled => {
+    syncFromRemote({ silent: true }).then(pulled => {
       if (pulled) {
         render();
-        showToast('已從雲端載入較新資料');
+        showToast('已從雲端載入資料');
       }
     });
   }
 
-  window.SiuHeiBook={getData:()=>structuredClone(db),setView,judgeEvent,version:'1.0.2'};
+  window.SiuHeiBook={getData:()=>structuredClone(db),setView,judgeEvent,version:'1.0.3'};
 })();
