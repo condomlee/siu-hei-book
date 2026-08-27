@@ -286,8 +286,48 @@
 
   function scheduleGistPush() {
     if (!isGistConfigured()) return;
+    // Never auto-upload pure demo data over the cloud
+    if (isMostlyDemoData(db)) return;
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => { pushToGist(); }, 2500);
+  }
+
+  function isMostlyDemoData(data = db) {
+    if (!data || typeof data !== 'object') return true;
+    if (data.settings?.demoData) return true;
+    const realPeople = (data.people || []).filter(p => !p.demo);
+    const realCases = (data.cases || []).filter(c => !c.demo);
+    return realPeople.length === 0 && realCases.length === 0;
+  }
+
+  function hasUsableRemoteData(remote) {
+    if (!remote || typeof remote !== 'object') return false;
+    if (!Array.isArray(remote.people) || !Array.isArray(remote.cases)) return false;
+    // Empty placeholder gist `{}` or empty arrays after first create
+    if (remote.people.length === 0 && remote.cases.length === 0) return false;
+    return true;
+  }
+
+  async function fetchGistSnapshot() {
+    if (!isGistConfigured()) throw new Error('尚未設定 Gist');
+    const res = await fetch(`https://api.github.com/gists/${gistConfig.gistId}`, {
+      headers: {
+        'Authorization': `Bearer ${gistConfig.token}`,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28'
+      }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `HTTP ${res.status}`);
+    }
+    const gist = await res.json();
+    const file = gist.files?.[GIST_FILENAME];
+    let remote = null;
+    if (file?.content) {
+      try { remote = JSON.parse(file.content); } catch (_) { remote = null; }
+    }
+    return { gist, remote, updatedAt: gist.updated_at };
   }
 
   async function pushToGist({ silent = true } = {}) {
@@ -328,27 +368,20 @@
   async function pullFromGist({ force = false } = {}) {
     if (!isGistConfigured()) return false;
     try {
-      const res = await fetch(`https://api.github.com/gists/${gistConfig.gistId}`, {
-        headers: {
-          'Authorization': `Bearer ${gistConfig.token}`,
-          'Accept': 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28'
-        }
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const gist = await res.json();
-      const file = gist.files?.[GIST_FILENAME];
-      if (!file?.content) return false;
+      const { remote, updatedAt } = await fetchGistSnapshot();
+      if (!hasUsableRemoteData(remote)) return false;
 
-      const remote = JSON.parse(file.content);
-      if (!remote || !Array.isArray(remote.people) || !Array.isArray(remote.cases)) return false;
-
-      const remoteTime = new Date(gist.updated_at).getTime();
+      const remoteTime = new Date(updatedAt).getTime();
       const localTime = db.settings?.lastLocalSave
         ? new Date(db.settings.lastLocalSave).getTime()
         : 0;
 
-      if (!force && remoteTime <= localTime) {
+      // Prefer remote when local is still demo-only, even if timestamps look newer
+      const shouldPull = force
+        || isMostlyDemoData(db)
+        || remoteTime > localTime;
+
+      if (!shouldPull) {
         console.log('[Gist] local is newer or same, skip pull');
         return false;
       }
@@ -362,6 +395,34 @@
       lastSyncError = err.message || String(err);
       console.warn('[Gist] pull failed:', lastSyncError);
       return false;
+    }
+  }
+
+  // First-time / new-device connect: pull remote if it has data; only push if Gist is empty
+  async function connectAndSyncGist() {
+    lastSyncError = null;
+    try {
+      const { remote } = await fetchGistSnapshot();
+      if (hasUsableRemoteData(remote)) {
+        normalizeData(remote, true);
+        db = remote;
+        lastSyncAt = new Date().toISOString();
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+        showToast('已從雲端載入資料，自動同步已啟用');
+        return 'pulled';
+      }
+      // Empty or placeholder Gist — seed it with current local data
+      const pushed = await pushToGist({ silent: true });
+      if (pushed) {
+        showToast('雲端尚無資料，已上傳本機資料並啟用自動同步');
+        return 'pushed';
+      }
+      showToast('連線失敗：' + (lastSyncError || '未知錯誤'));
+      return 'error';
+    } catch (err) {
+      lastSyncError = err.message || String(err);
+      showToast('連線失敗：' + lastSyncError);
+      return 'error';
     }
   }
 
@@ -870,11 +931,9 @@
       if(!gistId||!token){showToast('請填寫 Gist ID 和 Token');return;}
       gistConfig={gistId,token};
       persistGistConfig();
-      showToast('正在驗證連線…');
-      pushToGist({silent:false}).then(ok=>{
-        if(ok) showToast('自動同步已啟用');
-        render();
-      });
+      showToast('正在連線並同步…');
+      // Prefer remote data on new device — never overwrite cloud with local demo
+      connectAndSyncGist().then(() => { render(); });
     }
   });
 
@@ -897,8 +956,9 @@
   if(query.get('action')==='new-case')setTimeout(()=>openCaseForm(),100);
 
   // Auto-pull from Gist on startup when configured
+  // (always prefers remote if local is still demo data)
   if (isGistConfigured()) {
-    pullFromGist().then(pulled => {
+    pullFromGist({ force: isMostlyDemoData(db) }).then(pulled => {
       if (pulled) {
         render();
         showToast('已從雲端載入較新資料');
@@ -906,5 +966,5 @@
     });
   }
 
-  window.SiuHeiBook={getData:()=>structuredClone(db),setView,judgeEvent,version:'1.0.1'};
+  window.SiuHeiBook={getData:()=>structuredClone(db),setView,judgeEvent,version:'1.0.2'};
 })();
