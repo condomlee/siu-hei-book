@@ -2,6 +2,8 @@
   'use strict';
 
   const STORAGE_KEY = 'siuHeiBook.v1';
+  const GIST_CONFIG_KEY = 'siuHeiBook.gist';
+  const GIST_FILENAME = 'siu-hei-book.json';
   const CASE_TYPES = ['缺點', '小過', '大過'];
   const CASE_POINTS = {'缺點': 1, '小過': 3, '大過': 6};
   const CASE_STATUSES = ['待處理', '等待道歉', '改善中', '已改善', '已赦免', '永久記錄'];
@@ -29,6 +31,13 @@
   let toastTimer = null;
   let oldCaseId = null;
   let receiptCanvas = null;
+
+  // GitHub Gist auto-sync — credentials live only in localStorage, never hardcoded
+  let gistConfig = loadGistConfig();
+  let syncTimer = null;
+  let isSyncing = false;
+  let lastSyncAt = null;
+  let lastSyncError = null;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -240,13 +249,127 @@
   function saveData() {
     try {
       db.achievements = calculateAchievements();
+      db.settings = db.settings || {};
+      db.settings.lastLocalSave = new Date().toISOString();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+      scheduleGistPush();
       return true;
     } catch (error) {
       console.warn('資料無法儲存。', error);
       showToast('無法儲存：裝置空間可能已滿，請先匯出備份或移除大型圖片。');
       return false;
     }
+  }
+
+  // ── GitHub Gist auto-sync ──────────────────────────────────────────
+  function loadGistConfig() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(GIST_CONFIG_KEY));
+      if (saved && typeof saved.token === 'string' && typeof saved.gistId === 'string') {
+        return { token: saved.token, gistId: saved.gistId };
+      }
+    } catch (_) {}
+    return { token: '', gistId: '' };
+  }
+
+  function persistGistConfig() {
+    if (gistConfig.token && gistConfig.gistId) {
+      localStorage.setItem(GIST_CONFIG_KEY, JSON.stringify(gistConfig));
+    } else {
+      localStorage.removeItem(GIST_CONFIG_KEY);
+    }
+  }
+
+  function isGistConfigured() {
+    return Boolean(gistConfig.token && gistConfig.gistId);
+  }
+
+  function scheduleGistPush() {
+    if (!isGistConfigured()) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => { pushToGist(); }, 2500);
+  }
+
+  async function pushToGist({ silent = true } = {}) {
+    if (!isGistConfigured() || isSyncing) return false;
+    isSyncing = true;
+    lastSyncError = null;
+    try {
+      const content = JSON.stringify(db, null, 2);
+      const res = await fetch(`https://api.github.com/gists/${gistConfig.gistId}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${gistConfig.token}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28'
+        },
+        body: JSON.stringify({
+          files: { [GIST_FILENAME]: { content } }
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.message || `HTTP ${res.status}`);
+      }
+      lastSyncAt = new Date().toISOString();
+      if (!silent) showToast('已同步到 GitHub Gist');
+      return true;
+    } catch (err) {
+      lastSyncError = err.message || String(err);
+      console.warn('[Gist] push failed:', lastSyncError);
+      if (!silent) showToast('同步失敗：' + lastSyncError);
+      return false;
+    } finally {
+      isSyncing = false;
+    }
+  }
+
+  async function pullFromGist({ force = false } = {}) {
+    if (!isGistConfigured()) return false;
+    try {
+      const res = await fetch(`https://api.github.com/gists/${gistConfig.gistId}`, {
+        headers: {
+          'Authorization': `Bearer ${gistConfig.token}`,
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28'
+        }
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const gist = await res.json();
+      const file = gist.files?.[GIST_FILENAME];
+      if (!file?.content) return false;
+
+      const remote = JSON.parse(file.content);
+      if (!remote || !Array.isArray(remote.people) || !Array.isArray(remote.cases)) return false;
+
+      const remoteTime = new Date(gist.updated_at).getTime();
+      const localTime = db.settings?.lastLocalSave
+        ? new Date(db.settings.lastLocalSave).getTime()
+        : 0;
+
+      if (!force && remoteTime <= localTime) {
+        console.log('[Gist] local is newer or same, skip pull');
+        return false;
+      }
+
+      normalizeData(remote, true);
+      db = remote;
+      lastSyncAt = new Date().toISOString();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+      return true;
+    } catch (err) {
+      lastSyncError = err.message || String(err);
+      console.warn('[Gist] pull failed:', lastSyncError);
+      return false;
+    }
+  }
+
+  function gistStatusText() {
+    if (!isGistConfigured()) return '尚未設定';
+    if (lastSyncError) return `上次錯誤：${lastSyncError}`;
+    if (lastSyncAt) return `上次同步：${new Date(lastSyncAt).toLocaleString('zh-HK')}`;
+    return '已設定，等待首次同步';
   }
 
   function caseNumber(sequence = db?.cases?.length + 1 || 1, date = isoDate()) {
@@ -455,13 +578,42 @@
   }
 
   function renderSettings() {
+    const configured = isGistConfigured();
+    const maskedToken = gistConfig.token
+      ? gistConfig.token.slice(0, 7) + '…' + gistConfig.token.slice(-4)
+      : '';
     app.innerHTML = `${pageHead('資料管理 · ADMINISTRATION','設定及備份','所有資料只保存在這部裝置。','<button class="btn ghost" data-view="more">返回</button>')}
       <section class="settings-list">
         <div class="setting-row"><span><strong>📤 匯出全部資料</strong><small>下載一份 JSON 完整備份</small></span><button class="btn ghost small" data-action="export-data">下載</button></div>
         <div class="setting-row"><span><strong>📥 匯入及恢復</strong><small>從小氣簿 JSON 備份還原</small></span><button class="btn ghost small" data-action="import-data">選擇檔案</button></div>
         <div class="setting-row"><span><strong>🧹 清除示範資料</strong><small>移除首次開啟時提供的範例</small></span><button class="btn ghost small" data-action="clear-demo" ${db.settings.demoData?'':'disabled'}>${db.settings.demoData?'清除':'已清除'}</button></div>
         <div class="setting-row"><span><strong>🗑️ 清除全部資料</strong><small>這項操作需要二次確認</small></span><button class="btn danger small" data-action="clear-all">清除</button></div>
-      </section><div class="panel" style="margin-top:16px"><div class="panel-body" style="padding-top:17px"><span class="eyebrow">系統狀態</span><p>人物 ${db.people.length} 位 · 案件 ${db.cases.length} 宗 · 賞罰紀錄 ${db.scoreHistory.length} 筆</p><p class="date-code" style="text-align:left">資料版本 ${db.version||1} · LocalStorage · PWA Offline Ready</p></div></div>`;
+      </section>
+
+      <section class="panel" style="margin-top:16px">
+        <div class="panel-body" style="padding-top:17px">
+          <span class="eyebrow">雲端自動同步 · GITHUB GIST</span>
+          <p style="margin:8px 0 12px;font-size:0.9em;line-height:1.5">設定後每次儲存會自動同步到你的私密 Gist，換裝置時自動載入。Token 只存在本機，不會上傳到其他地方。</p>
+          ${configured ? `
+            <p style="font-size:0.88em;margin-bottom:8px"><strong>狀態：</strong>${esc(gistStatusText())}</p>
+            <p style="font-size:0.85em;color:#666;margin-bottom:12px">Gist ID：${esc(gistConfig.gistId)}<br>Token：${esc(maskedToken)}</p>
+            <div class="button-row wrap" style="margin-bottom:12px">
+              <button class="btn ghost small" data-action="gist-force-push">立即上傳</button>
+              <button class="btn ghost small" data-action="gist-force-pull">立即下載</button>
+              <button class="btn danger small" data-action="gist-clear">解除同步</button>
+            </div>
+          ` : `
+            <form id="gist-config-form">
+              <div class="field"><label>Gist ID</label><input name="gistId" type="text" required placeholder="從 gist.github.com 網址複製" autocomplete="off"></div>
+              <div class="field"><label>Personal Access Token</label><input name="token" type="password" required placeholder="ghp_…（只需 gist 權限）" autocomplete="off"></div>
+              <p style="font-size:0.8em;color:#666;margin:0 0 12px">建立方式：GitHub → Settings → Developer settings → Personal access tokens → Generate new token (classic) → 只勾選 <code>gist</code>。Gist 請建立為 Secret，檔名 <code>${GIST_FILENAME}</code>。</p>
+              <button class="btn primary block" type="submit">儲存並啟用自動同步</button>
+            </form>
+          `}
+        </div>
+      </section>
+
+      <div class="panel" style="margin-top:16px"><div class="panel-body" style="padding-top:17px"><span class="eyebrow">系統狀態</span><p>人物 ${db.people.length} 位 · 案件 ${db.cases.length} 宗 · 賞罰紀錄 ${db.scoreHistory.length} 筆</p><p class="date-code" style="text-align:left">資料版本 ${db.version||1} · LocalStorage · PWA Offline Ready${configured ? ' · Gist Sync' : ''}</p></div></div>`;
   }
 
   function render() {
@@ -694,6 +846,9 @@
       'mass-pardon':()=>openModal('新年大赦',massPardonForm()),'export-data':exportData,'import-data':()=>$('#import-file').click(),
       'clear-demo':()=>confirmAction('清除示範資料','只會清除系統首次建立的示範人物、案件及分數，確定嗎？',()=>{const demoPersonIds=new Set(db.people.filter(p=>p.demo).map(p=>p.id));const demoCaseIds=new Set(db.cases.filter(c=>c.demo).map(c=>c.id));db.people=db.people.filter(p=>!p.demo);db.cases=db.cases.filter(c=>!c.demo);db.scoreHistory=db.scoreHistory.filter(h=>!h.demo&&!demoPersonIds.has(h.personId)&&!demoCaseIds.has(h.caseId));db.settings.demoData=false;saveData();closeConfirm();render();showToast('示範資料已清除，可以開始建立你的紀錄。');}),
       'clear-all':()=>confirmAction('第一次確認','這會清除全部人物、案件、簽名及分數。按下後仍需最後一次確認。',()=>{closeConfirm();setTimeout(()=>confirmAction('最後確認','真的要把整本小氣簿清空？此操作不能復原。',()=>{db={version:1,people:[],cases:[],scoreHistory:[],achievements:[],settings:{ownerName:'本簿持有人',demoData:false}};saveData();closeConfirm();setView('home');showToast('全部資料已清除。');}),150);}),
+      'gist-force-push':async()=>{showToast('正在上傳…');await pushToGist({silent:false});if(currentView==='settings')render();},
+      'gist-force-pull':()=>confirmAction('從 Gist 下載','會用雲端資料覆蓋本機目前內容，確定嗎？',async()=>{closeConfirm();showToast('正在下載…');const ok=await pullFromGist({force:true});if(ok){render();showToast('已從 Gist 載入資料');}else showToast(lastSyncError?'下載失敗：'+lastSyncError:'雲端沒有較新資料或格式不符');}),
+      'gist-clear':()=>confirmAction('解除雲端同步','只會清除本機儲存的 Token 與 Gist ID，不會刪除 Gist 本身。',()=>{gistConfig={token:'',gistId:''};persistGistConfig();lastSyncAt=null;lastSyncError=null;closeConfirm();render();showToast('已解除自動同步');}),
       'cancel-confirm':closeConfirm,
       'verdict-to-case':()=>{const verdict={personId:target.dataset.person,title:decodeURIComponent(target.dataset.event).slice(0,42),description:decodeURIComponent(target.dataset.event),type:target.dataset.type,points:Number(target.dataset.points),suggestion:decodeURIComponent(target.dataset.suggestion),date:isoDate(),time:nowTime(),status:'待處理',mood:'激氣'};openModal('採納判決並立案',caseForm(verdict));}
     };
@@ -708,6 +863,19 @@
     if(form.id==='judge-form'){const data=Object.fromEntries(new FormData(form));const result=judgeEvent(data.event,data.personId,data.mode);const previousMode=db.settings.judgeMode;db.settings.judgeMode=data.mode;if(!saveData())db.settings.judgeMode=previousMode;renderVerdict(result,data.event,data.personId);}
     if(form.id==='birthday-form'){const id=new FormData(form).get('personId');const deduction=Math.min(5,personPoints(id));if(!deduction){showToast('這位人物目前沒有犯錯點數可供減免。');return;}const before=structuredClone(db);db.scoreHistory.push({id:uid('score'),personId:id,caseId:null,amount:-deduction,creditDelta:4,reason:'生日特赦',date:isoDate(),createdAt:new Date().toISOString()});if(!saveData()){db=before;return;}closeModal();render();showToast(`生日特赦已減少 ${deduction} 點，歷史仍然存在。`);}
     if(form.id==='mass-pardon-form'){const ids=new FormData(form).getAll('caseId');if(!ids.length){showToast('請至少選擇一宗案件。');return;}const before=structuredClone(db);ids.forEach(id=>pardonCase(id,'新年大赦',{save:false,silent:true}));if(!saveData()){db=before;return;}closeModal();render();showToast(`已赦免 ${ids.length} 宗案件，歷史仍然存在。`);}
+    if(form.id==='gist-config-form'){
+      const data=Object.fromEntries(new FormData(form));
+      const gistId=String(data.gistId||'').trim();
+      const token=String(data.token||'').trim();
+      if(!gistId||!token){showToast('請填寫 Gist ID 和 Token');return;}
+      gistConfig={gistId,token};
+      persistGistConfig();
+      showToast('正在驗證連線…');
+      pushToGist({silent:false}).then(ok=>{
+        if(ok) showToast('自動同步已啟用');
+        render();
+      });
+    }
   });
 
   document.addEventListener('input', event => { if(event.target.id==='case-search'||event.target.id==='people-search')event.target.id==='case-search'?filterCases():filterPeople(); });
@@ -728,5 +896,15 @@
   const query=new URLSearchParams(location.search); render();
   if(query.get('action')==='new-case')setTimeout(()=>openCaseForm(),100);
 
-  window.SiuHeiBook={getData:()=>structuredClone(db),setView,judgeEvent,version:'1.0.0'};
+  // Auto-pull from Gist on startup when configured
+  if (isGistConfigured()) {
+    pullFromGist().then(pulled => {
+      if (pulled) {
+        render();
+        showToast('已從雲端載入較新資料');
+      }
+    });
+  }
+
+  window.SiuHeiBook={getData:()=>structuredClone(db),setView,judgeEvent,version:'1.0.1'};
 })();
